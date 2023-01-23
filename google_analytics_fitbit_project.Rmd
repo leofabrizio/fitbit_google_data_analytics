@@ -1,0 +1,786 @@
+---
+title: "Correlating Fitbit activity data and sleeping patterns"
+author: "Fabrizio Leo"
+date: "2023-01-21"
+output:
+  pdf_document: default
+subtitle: Final capstone project for the Google Data Analytics Professional Certificate
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction and background
+
+## Goals
+
+The aim of this project is to analyze Fitbit usage data to find out patterns and trend in physical activity, physiological and sleep data.
+In particular, the main goals are: 
+
+* define and identify active and sedentary Fitbit users in a Fitbit dataset
+
+* find out how these groups differ in terms of pattern of activity, number of steps and physiological variables such as heart rate and calories 
+
+* find out whether these groups differ in terms of sleeping habits, in particular in the amount of sleep and time in bed. 
+
+The final goal is to inform sedentary people by providing them with information that can be used by them to start an healthier and more active lifestyle.
+
+## The Data
+
+I use the dataset publicy available at the following link:
+
+https://www.kaggle.com/arashnic/fitbit
+
+It includes thirty Fitbit users data collected between 03/12/2016 and 05/12/2016 including minute-level output for physical activity, heart rate and sleep monitoring. These data are organized in several csv files. Kaggle reports a usability score of 10 for this dataset.
+
+First, I download and install some required libraries
+
+```{r message=FALSE, warning=FALSE}
+#install.packages(c("lubridate","tidyverse","plotrix","rstatix","here"))
+
+library(lubridate)
+library(tidyverse)
+library(plotrix)
+library(rstatix)
+library(here)
+```
+
+## Loading your CSV files
+
+I load a dataframe with the daily activity.
+```{r}
+daily_activity <- read_csv(here("data","dailyActivity_merged.csv"))
+
+```
+I also load a different csv for sleep data.
+
+```{r}
+sleep_day <- read_csv(here("data","sleepDay_merged.csv"))
+```
+## Exploring a few key tables
+
+Take a look at the daily_activity data.
+
+```{r}
+head(daily_activity)
+
+```
+
+Identify all the columsn in the daily_activity data.
+
+```{r}
+colnames(daily_activity)
+
+```
+
+Take a look at the sleep_day data.
+
+```{r}
+head(sleep_day)
+
+```
+
+Identify all the columsn in the daily_activity data.
+
+```{r}
+colnames(sleep_day)
+
+```
+
+## Understanding some summary statistics
+
+I check the number of unique participants in each dataframe.
+
+```{r distinct users}
+n_distinct(daily_activity$Id)
+n_distinct(sleep_day$Id)
+```
+
+How many observations are there in each dataframe?
+
+```{r observations}
+nrow(daily_activity)
+nrow(sleep_day)
+```
+
+I compute some quick summary statistics for each dataframe.
+
+For the daily activity dataframe:
+
+```{r}
+daily_activity %>%  
+  select(TotalSteps,
+         TotalDistance,
+         SedentaryMinutes) %>%
+  summary()
+```
+
+For the sleep dataframe:
+
+```{r}
+sleep_day %>%  
+  select(TotalSleepRecords,
+  TotalMinutesAsleep,
+  TotalTimeInBed) %>%
+  summary()
+```
+It looks like there might be outliers for the sleep duration and total time in bed. I will explore this issue afterwards.
+
+
+## Plotting a few explorations
+
+What's the relationship between steps taken in a day and sedentary minutes?
+
+```{r message=FALSE}
+ggplot(data=daily_activity, aes(x=TotalSteps, y=SedentaryMinutes)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = "Correlation between number of steps and sedentary duration", x = "Total Steps", y = "Sedentary Time (minutes)")
+```
+
+
+The relationship between steps and sedentary time seems to differ depending on the number of steps. Until about 10000 steps, the more the steps the less the duration of the sedentary time. After the 10000 steps threshold, the duration of the sedentary time tends to increase with increasing the number of steps.
+
+
+What's the relationship between minutes asleep and time in bed? We might expect it to be almost completely linear - are there any unexpected trends?
+
+```{r message=FALSE, warning=FALSE}
+ggplot(data=sleep_day, aes(x=TotalMinutesAsleep, y=TotalTimeInBed)) + 
+  geom_point() +
+  geom_smooth() +
+  labs(title = "Correlation between asleep time and total time in bed", y = "Total Time in Bed", x = "Total Time Asleep")
+```
+
+
+As expected, the relationship between sleep duration and total time in bed is almost perfectly linear.
+
+## Merging these two datasets together
+
+```{r}
+combined_data <- merge(sleep_day, daily_activity, by="Id")
+
+```
+
+Take a look at how many participants are in this data set (after inner join).
+
+```{r}
+n_distinct(combined_data$Id)
+
+```
+## Cleaning
+
+Let's start doing some cleaning. In particular, I change the format of date from string to proper dates.
+
+```{r cleaning dates}
+
+#separate date from time
+combined_data <- combined_data %>% separate(SleepDay, into = c('Sleep_day','Sleep_time'), sep = ' ', extra = 'merge')
+
+#remove useless column
+combined_data$Sleep_time <- NULL
+
+#convert dates from strings to proper dates
+output_1 <- combined_data %>% select(Sleep_day) %>% mutate(Sleep_date = mdy(Sleep_day))
+output_2 <- combined_data %>% select(ActivityDate) %>% mutate(Activity_date = mdy(ActivityDate))
+
+#add columns with proper dates
+combined_data$Sleep_date <- output_1$Sleep_date
+combined_data$Activity_date <- output_2$Activity_date
+
+#remove old dolumns
+combined_data$Sleep_day <- NULL
+combined_data$ActivityDate <- NULL
+rm(output_1,output_2)
+
+#relocate columns
+combined_data <- combined_data %>% relocate(Sleep_date, .after = Id)
+combined_data <- combined_data %>% relocate(Activity_date, .before = TotalSteps)
+
+```
+
+## Other trends
+
+Now I can explore some different relationships between activity and sleep as well. For example, we can investigate whether participants who sleep more also take more steps or fewer steps per day. Is there a relationship at all? 
+To answer to these question, I first compute the average sleep duration and number of steps per day by subject.
+
+```{r compute_avg_sleep_and_steps}
+#calculate average sleep by subject
+sleep_summary <- combined_data %>% group_by(Id) %>% summarise(avg_sleep_duration = mean(TotalMinutesAsleep))
+
+#calculate average number of steps by subject
+steps_summary <- combined_data %>% group_by(Id) %>% summarise(avg_steps = mean(TotalSteps))
+
+#and I merge for displaying purposes
+corr_sleep_steps <- merge(sleep_summary, steps_summary, by='Id')
+```
+
+Good. Now, I'm ready to plot the correlation between number of steps and sleep duration.
+
+```{r plot_steps_by_sleep, message=FALSE, warning=FALSE}
+ggplot(data = corr_sleep_steps, mapping = aes(x=avg_steps, y=avg_sleep_duration)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = "Correlation between number of steps and sleep duration", x = "Number of Steps", y = "Sleep Duration")
+```
+
+
+There is no clear correlation between number of steps per day and sleep duration.
+
+
+Now, let's see whether there is a correlation between sleep and amount of time a subject is very active.
+
+```{r}
+#calculate duration of strong activity by subject
+very_active_summary <- combined_data %>% group_by(Id) %>% summarise(avg_very_active_time = mean(VeryActiveMinutes))
+
+#and I merge with other data
+summary_data <- merge(corr_sleep_steps,very_active_summary,by='Id')
+```
+
+Now, I can plot relation between sleep time and amount of very active minutes.
+
+```{r message=FALSE}
+ggplot(data = summary_data, mapping = aes(x=avg_very_active_time,y=avg_sleep_duration)) +
+  geom_point() +
+  geom_smooth() + 
+  labs(title = "Correlation between very active time and sleep duration",
+       x = "Very active time", y = "Sleep duration")
+
+```
+
+Also in this case there is no clear correlation between time spent doing vigorous physical activity and sleep duration.
+
+## Analyses
+
+Let's start investigating the research goals described at the beginning of this document. First, I will address the first aim, that is, dividing the dataset in sedentary and very active subjects. To do so, I will work with a new csv file.
+
+```{r message=FALSE}
+hourly_activity <- read_csv(here("data", "hourlyIntensities_merged.csv"))
+```
+
+Let's see how it is structured.
+
+```{r}
+head(hourly_activity)
+```
+
+Then, I clean it.
+
+```{r}
+hourly_activity <- hourly_activity %>% separate(ActivityHour, into = c('Activity_date','Activity_time'), sep=' ', extra='merge')
+
+new_times <- hour(parse_time(gsub("\\.", "", hourly_activity$Activity_time), "%I:%M:%S %p"))
+
+hourly_activity$Activity_time <- new_times
+```
+
+I visualize the mean intesnity by hour. Before that, I compute the required summary stats
+
+```{r message=FALSE}
+by_hour <- hourly_activity %>% 
+  group_by(Id,Activity_time) %>% 
+  summarise(avg_intensity = mean(AverageIntensity))
+
+head(by_hour)
+
+```
+Now, I plot it.
+
+```{r}
+by_hour %>% 
+  group_by(Activity_time) %>% 
+  summarise(avg_intensity = mean(avg_intensity)) %>% 
+  ggplot(mapping=aes(x=Activity_time,y=avg_intensity))+
+  geom_line()+
+  geom_point()+
+  scale_x_continuous(breaks=seq(0,23,1))+
+  labs(title='Average intensity by hour', x='Hour', y='Average Intensity')
+
+```
+
+As expected, the average activity is low in late evening and night and it reaches two peaks: one around 12 and one around 18.
+
+Now, I compute the mean intensity by subject to find active and sedentary persons.
+
+```{r}
+by_subj <- by_hour %>% 
+  group_by(Id) %>% 
+  summarise(avg_intensity = mean(avg_intensity))
+
+head(by_subj)
+```
+I visualize the distribution ot mean intensity.
+
+```{r}
+ggplot(data=by_subj, mapping=aes(y=avg_intensity))+
+  geom_boxplot()+
+  #geom_dotplot(binaxis = "y", stackdir = "center", dotsize = 0.5)+
+  annotate("text", x=0, y=0.23, label="Median = 0.215", color='red', size=3.5) +
+  labs(title='Distribution of Mean Intensity',
+       y = 'Mean Intensity',
+       x = NULL) +
+  scale_x_discrete(breaks=NULL)
+```
+
+I also save the median intensity which is necesssary to separate the groups.
+
+```{r}
+median_intensity <- median(by_subj$avg_intensity)
+```
+
+Now, I can define the two groups.
+
+```{r}
+by_subj <- by_subj %>% mutate(group = ifelse(avg_intensity < median_intensity, 'sedentary', 'active'))
+by_subj <- by_subj %>% relocate(group, .after = Id)  
+
+head(by_subj)
+```
+To proceed with the analyses I need to extract the active and sedentary subjects Ids.
+
+```{r}
+active_Id <- by_subj %>% select(Id,group) %>% filter(group=='active') 
+active_Id$group = NULL #do not need the group
+active_Id <- as.list(active_Id)
+
+sedentary_Id <- by_subj %>% select(Id,group) %>% filter(group=='sedentary')
+sedentary_Id$group = NULL
+sedentary_Id <- as.list(sedentary_Id)
+```
+
+I need to add the column "group" to the dataframe of daily activities
+
+```{r}
+daily_activity <- daily_activity %>% mutate(group = ifelse(Id %in% sedentary_Id$Id, 'sedentary', 'active'))
+daily_activity <- daily_activity %>% relocate(group, .after = Id)
+
+head(daily_activity)
+```
+
+I can now extract some summary stats. I start with the averages
+
+```{r}
+activity_summary_avg <- daily_activity %>% 
+  select(group,TotalSteps,VeryActiveMinutes,FairlyActiveMinutes,LightlyActiveMinutes,SedentaryMinutes,Calories) %>% 
+  group_by(group) %>% 
+  summarise(avg_VeryActiveMinutes = mean(VeryActiveMinutes), 
+            avg_FairlyActiveMinutes = mean(FairlyActiveMinutes),
+            avg_LightlyActiveMinutes = mean(LightlyActiveMinutes),
+            avg_SedentaryMinutes = mean(SedentaryMinutes))
+```
+
+I also need the standard errors of those averages
+
+```{r}
+activity_summary_se <- daily_activity %>% 
+  select(group,TotalSteps,VeryActiveMinutes,FairlyActiveMinutes,LightlyActiveMinutes,SedentaryMinutes,Calories) %>% 
+  group_by(group) %>% 
+  summarise(se_VeryActiveMinutes = std.error(VeryActiveMinutes),
+            se_FairlyActiveMinutes = std.error(FairlyActiveMinutes),
+            se_LightlyActiveMinutes = std.error(LightlyActiveMinutes),
+            se_SedentaryMinutes = std.error(SedentaryMinutes))
+```
+
+Before plotting, I need to convert data from wide to long format
+
+```{r}
+#averages first
+activity_summary_avg_long <- activity_summary_avg %>% pivot_longer(cols = starts_with('avg_'), names_to = 'variable')
+
+#then, se
+activity_summary_se_long <- activity_summary_se %>% pivot_longer(cols = starts_with('se_'), names_to = 'variable')
+
+head(activity_summary_avg_long)
+```
+I do some extra cleaning.
+
+```{r}
+#rename column value
+activity_summary_se_long <- rename(activity_summary_se_long, se = value)
+
+#add standard error to the df with the averages
+activity_summary_avg_long$se = activity_summary_se_long$se
+
+#I factorize to specify the order of conditions to show in the bar plot
+activity_summary_avg_long$variable <- factor(activity_summary_avg_long$variable,levels = c("avg_SedentaryMinutes","avg_LightlyActiveMinutes","avg_FairlyActiveMinutes", "avg_VeryActiveMinutes"))
+
+#rename df
+activity_summary_long = activity_summary_avg_long
+
+#finally, I delete redundant info
+rm(activity_summary_avg_long,activity_summary_se_long,activity_summary_avg,activity_summary_se)
+```
+
+Now, I can plot
+
+```{r}
+ggplot(data = activity_summary_long, mapping = aes(variable, value, fill=group))+
+  geom_bar(position=position_dodge(), stat="identity")+
+  geom_errorbar(aes(ymin=value-se, ymax=value+se),
+                width=.2,                    # Width of the error bars
+                position=position_dodge(.9))+
+  labs(title = 'Mean Duration of Activity Intensity by group',
+       y = 'Duration (minutes)',
+       x = 'Activity',
+       caption="SEM are indicated")+
+  scale_x_discrete(labels=c("avg_SedentaryMinutes"="Sedentary",
+                            "avg_LightlyActiveMinutes"="Lightly Active",
+                            "avg_FairlyActiveMinutes"= "Fairly Active",
+                            "avg_VeryActiveMinutes"="Very Active"))+
+  theme(plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0))
+```
+
+For completeness, I show also the raw data in table format.
+
+```{r}
+head(activity_summary_long, n=dim(activity_summary_long))
+```
+It is clear that the two groups differ in terms of pattern of activity. The active group spend less time in sedentary state and spend more time in all the other active states than the sedentary group.
+
+Now, I investigate how the two groups differ in number of daily steps
+
+```{r}
+steps_summary <- daily_activity %>% 
+  select(Id,group,TotalSteps) %>% 
+  group_by(Id,group) %>% 
+  summarise(avg_steps = mean(TotalSteps))
+
+head(steps_summary)
+```
+and I visualize it
+
+```{r}
+ggplot(data=steps_summary, aes(x=group,y=avg_steps))+
+  geom_boxplot()+
+  geom_jitter(width = 0.2)+
+  labs(title='Distribution of mean number of steps per day by group',
+       y='Mean steps', caption = "Dots indicate single datapoints")+
+  theme(plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0))
+```
+
+Same for number of calories
+
+```{r}
+calories_summary <- daily_activity %>% 
+  select(Id,group,Calories) %>% 
+  group_by(Id,group) %>% 
+  summarise(avg_calories = mean(Calories))
+
+head(calories_summary)
+```
+I visualize it
+
+```{r}
+ggplot(data=calories_summary, aes(x=group,y=avg_calories))+
+  geom_boxplot()+
+  geom_jitter(width = 0.2)+
+  labs(title='Distribution of mean calories per day by group',
+       y='Mean calories', caption = "Dots indicate single datapoints")+
+  theme(plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0))
+```
+
+Now, I want to plot the mean intensity by hour by group. To do so, I first add the 'group' column to the df with hour data.
+
+```{r}
+by_hour <- by_hour %>% mutate(group = ifelse(Id %in% sedentary_Id$Id,"sedentary","active"))
+by_hour <- relocate(by_hour, group, .after=Id)
+```
+
+Now, I can plot it
+
+```{r}
+by_hour %>% 
+  group_by(group,Activity_time) %>% 
+  summarise(intensity = mean(avg_intensity), se = std.error(avg_intensity)) %>%  
+  ggplot(mapping=aes(x=Activity_time, y=intensity, group=group, color=group))+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(ymin=intensity-se, ymax=intensity+se),
+                width=.2)+
+  labs(title = 'Mean intensity per hour by group',
+       y='Mean Intensity',
+       x='Hour')+
+  scale_x_continuous(breaks=seq(0,23,2))
+```
+
+We can clearly see that the active group is more active in daytime and also in the evening. It is not only due to higher, isolated, peaks of activity but generally, they have a higher baseline of activity.
+
+Let's now see what happens with heart rate data.
+
+First, I load the right csv file
+
+```{r}
+heart_rate <- read_csv(here("data","heartrate_seconds_merged.csv"))
+head(heart_rate)
+```
+I do some cleaning. Date formatting first.
+```{r}
+heart_rate <- heart_rate %>% separate(Time, into = c("Date", "Time"), sep = " ", extra = "merge")
+new_times <- hour(parse_time(gsub("\\.", "", heart_rate$Time), "%I:%M:%S %p"))
+
+heart_rate <- heart_rate %>% mutate(Time = new_times)
+```
+
+Let'see if it is correct
+```{r}
+head(heart_rate)
+```
+Let's add the 'group' column
+
+```{r}
+heart_rate <- heart_rate %>% mutate(group = ifelse(Id %in% sedentary_Id$Id, "sedentary", "active")) 
+heart_rate <- relocate(heart_rate, group, .after=Id)
+head(heart_rate)
+```
+Let's see how the two groups differ in heart rate by hour. I prepare the data first.
+
+```{r, message=FALSE}
+heartrate_byhour <- heart_rate %>% 
+  select(Id,group,Time,Value) %>% 
+  group_by(Id, group, Time) %>% 
+  summarise(avg_heartrate = mean(Value))
+
+heartrate_byhour <- heartrate_byhour %>%   
+  group_by(group,Time) %>% 
+  summarise(heartrate = mean(avg_heartrate,na.rm = TRUE), se = std.error(avg_heartrate,na.rm = TRUE))
+
+```
+
+I can plot now
+
+```{r}
+ggplot(data = heartrate_byhour,mapping= aes(x=Time,y=heartrate, group = group, color = group))+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(ymin=heartrate-se, ymax=heartrate+se),
+                width=.2)+
+  labs(title = 'Mean heart rate per hour by group',
+       y='Mean Heart Rate',
+       x='Hour')+
+  scale_x_continuous(breaks=seq(0,23,2))
+```
+
+This looks very interesting. Heart rate is generally higher in the sedentary group even tough they are less active. This is also true during the night when the persons are sleeping!
+
+Let's do some  analyses to find out whether this trend is statistically significant.
+First, I compute the mean heart rate by group
+```{r}
+mean_heartrate_active <- mean(heartrate_byhour$heartrate[heartrate_byhour$group=="active"])
+mean_heartrate_sedentary <- mean(heartrate_byhour$heartrate[heartrate_byhour$group=="sedentary"])
+
+mean_heartrate_active
+mean_heartrate_sedentary
+```
+Compare these means
+```{r}
+t.test(heartrate_byhour$heartrate[heartrate_byhour$group=="active"], heartrate_byhour$heartrate[heartrate_byhour$group=="sedentary"])
+
+```
+Yes, the difference is significant!
+
+I am ready to approach the final part of the analyses, that is, the sleep data.
+
+I add the 'group' column to sleep df.
+
+```{r}
+sleep_day <- sleep_day %>% mutate(group = ifelse(Id %in% sedentary_Id$Id, "sedentary", "active")) 
+sleep_day <- relocate(sleep_day, group, .after=Id)
+```
+
+I calculate some summary stats
+
+```{r}
+sleep_summary <- sleep_day %>% select(Id, group, TotalMinutesAsleep, TotalTimeInBed) %>% 
+  group_by(Id,group) %>% 
+  summarise(time_asleep = mean(TotalMinutesAsleep), 
+            time_inbed = mean(TotalTimeInBed),
+            se_asleep = std.error(TotalMinutesAsleep),
+            se_inbed = std.error(TotalTimeInBed))
+```
+Visualize it
+```{r}
+head(sleep_summary)
+```
+A previous visualization identified potential outliers. Let's investigate this issue in a more detailed way. Let's check asleep time first
+
+```{r}
+sleep_summary %>%
+  group_by(group) %>%
+  identify_outliers(time_asleep)
+```
+Now, the same for the time in bed
+```{r}
+sleep_summary %>%
+  group_by(group) %>%
+  identify_outliers(time_inbed)
+```
+Let's see if there is something strange with those Ids. Perhaps, too little data?
+
+```{r}
+filter(sleep_day,Id==7007744171)
+
+```
+```{r}
+filter(sleep_day,Id==2320127002)
+
+```
+```{r}
+filter(sleep_day,Id==4558609924)
+
+```
+```{r}
+filter(sleep_day,Id==1844505072)
+
+```
+
+There are in particular two Ids with 2 or less night data. I remove these two Ids.
+
+```{r}
+sleep_cleaned <- sleep_day %>% 
+  filter(!Id %in% c(7007744171,2320127002))
+```
+
+and I redo the stats with the cleaned df
+
+```{r}
+sleep_summary_clean <- sleep_cleaned %>% select(Id, group, TotalMinutesAsleep, TotalTimeInBed) %>% 
+  group_by(Id,group) %>% 
+  summarise(time_asleep = mean(TotalMinutesAsleep), 
+            time_inbed = mean(TotalTimeInBed),
+            se_asleep = std.error(TotalMinutesAsleep),
+            se_inbed = std.error(TotalTimeInBed))
+
+sleep_summary_clean <- sleep_summary_clean %>% 
+  group_by(group) %>% 
+  summarise(time_asleep = mean(time_asleep), 
+            time_inbed = mean(time_inbed),
+            se_asleep = std.error(se_asleep),
+            se_inbed = std.error(se_inbed)) 
+```
+I change the format to long for visualization purposes
+
+```{r}
+sleep_summary_clean_long <- pivot_longer(sleep_summary_clean, cols=starts_with("time_"), names_to="condition")
+#adding standard errors
+sleep_summary_clean_long$se <- c(sleep_summary_clean$se_asleep[1], sleep_summary_clean_long$se_inbed[1], sleep_summary_clean$se_asleep[3], sleep_summary_clean_long$se_inbed[3])
+#removing redundant cols
+sleep_summary_clean_long$se_asleep = NULL
+sleep_summary_clean_long$se_inbed = NULL
+```
+
+Ready to plot
+
+```{r}
+ggplot(data = sleep_summary_clean_long, mapping=aes(x=condition,y=value, fill = group))+
+  geom_bar(position=position_dodge(), stat="identity")+
+  geom_errorbar(aes(ymin=value-se, ymax=value+se),
+                width=.2,                    # Width of the error bars
+                position=position_dodge(.9))+
+  labs(title = 'Mean duration of sleep and total time in bed by group',
+       y = 'Duration (minutes)',
+       x = 'Condition',
+       caption="SEM are indicated")+
+  scale_x_discrete(labels=c("time_asleep"="Asleep",
+                            "time_inbed"="In bed"))+
+  theme(plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0))
+```
+
+It is evident how the sedentary group tends to sleep more and to stay in bed for longer than the active group.
+
+Let's examine whether this trend is statistically significant or not.
+
+To chose the right statistical tool, I need to verify whether data are normally distributed or not.
+
+I start with the sleep data of the active group
+
+```{r}
+active_asleep <- sleep_cleaned %>% 
+  select(Id,group,TotalMinutesAsleep) %>% 
+  filter(group=="active") %>%  
+  group_by(Id) %>% 
+  summarise(time_asleep = mean(TotalMinutesAsleep)) %>% 
+  select(time_asleep)
+
+shapiro.test(active_asleep$time_asleep)
+```
+Not normal.
+
+Sleep data of sedentary group
+
+```{r}
+sedentary_asleep <- sleep_cleaned %>% 
+  select(Id,group,TotalMinutesAsleep) %>% 
+  filter(group=="sedentary") %>%  
+  group_by(Id) %>% 
+  summarise(time_asleep = mean(TotalMinutesAsleep)) %>% 
+  select(time_asleep)
+
+shapiro.test(sedentary_asleep$time_asleep)
+```
+Normal
+
+Time in bed data of the active group
+
+```{r}
+active_inbed <- sleep_cleaned %>% 
+  select(Id,group,TotalTimeInBed) %>% 
+  filter(group=="active") %>%  
+  group_by(Id) %>% 
+  summarise(time_inbed = mean(TotalTimeInBed)) %>% 
+  select(time_inbed)
+
+shapiro.test(active_inbed$time_inbed)
+```
+Not normal.
+
+Time in bed data of the sedentary group
+
+```{r}
+sedentary_inbed <- sleep_cleaned %>% 
+  select(Id,group,TotalTimeInBed) %>% 
+  filter(group=="sedentary") %>%  
+  group_by(Id) %>% 
+  summarise(time_inbed = mean(TotalTimeInBed)) %>% 
+  select(time_inbed)
+
+shapiro.test(sedentary_inbed$time_inbed)
+```
+
+I proceed with non-parametric tests. 
+First, I compare the median asleep time of the two groups
+
+```{r}
+wilcox.test(active_asleep$time_asleep, sedentary_asleep$time_asleep)
+```
+Then, I compare the median total time in bed of the two groups
+
+```{r}
+wilcox.test(active_inbed$time_inbed, sedentary_inbed$time_inbed)
+
+```
+Both comparison are not significant maybe because of the small sample sizes.
+
+## Summary
+
+This project was aimed at analyzing Fitbit data to understand how very active users differ compared to more sedentary users. Importantly, these two groups of users were defined based on Fitbit data rather than their self-evaluation. 
+
+We have discriminated active from sedentary persons based on the mean intensity per day. The following analyses demonstrated that active people spent less time in sedentary state and more time doing from light to strong physical activity than the sedentary group. Importantly, with the exception of nigh time, they were always more active than sedentary people. This indicates that the higher mean intensity in the active group was not due to isolated peaks of activity (e.g., going to the gym at 18 pm) but rather to a constantly higher level of activity across all day. The active persons showed also a higher number of steps, higher consumption of calories and lower heart rate. Interestingly, the lower hear rate was also present during sleep.
+
+As for the relationship between physical activity and sleep, the analyses showed little evidence of an effect of such activity on sleep. Although, there is a visual trend towards lower duration of the total time in bed as well as the asleep time compared to the sedentary group, this trend was not significant. It is possible this was due to the small sample size of Fitbit users we could evaluate.
+
+Since, because of privacy concerns, sensitive data such as age, gender and health conditions were not available, it is possible that such variables might have contributed to the differences between groups.
+
+## Conclusion
+
+This project has showed that: 
+
+* an active lifestyle, as defined by higher number of steps, number of calories and mean intensity is associated with lower heart rate. A lower heart rate is tipically a sign the heart is working well since it pumps more blood with each contraction; 
+
+* there is a trend towards better sleep efficiency in active users compared to more sedentary users which need to be confirmed by future investigations with larger sample sizes.  
+
+This may be helpful as a guidance for person aiming at developing a more active lifestyle.
